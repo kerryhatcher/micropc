@@ -1,0 +1,27 @@
+[package]
+name = "micropc-firmware"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Firmware for the micropc device on the RP2040"
+
+[[bin]]
+name = "micropc-firmware"
+path = "src/main.rs"
+test = false
+doctest = false
+bench = false
+
+[dependencies]
+micropc-shared.workspace = true
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+embedded-hal = "1"
+panic-halt = "1"
+rp2040-boot2 = "0.3"
+rp2040-hal = { version = "0.12", features = ["rt", "critical-section-impl"] }
+pio = "0.3"
+usb-device = "0.3"
+usbd-serial = "0.2"

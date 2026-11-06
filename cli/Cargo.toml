@@ -1,0 +1,19 @@
+[package]
+name = "micropc-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Host-side CLI/TUI for the micropc device"
+
+[[bin]]
+name = "micropc"
+path = "src/main.rs"
+
+[dependencies]
+micropc-shared.workspace = true
+ratatui = "0.30"
+# Without libudev: port enumeration falls back to sysfs on Linux, so no
+# system headers are needed to build.
+serialport = { version = "4.10", default-features = false }

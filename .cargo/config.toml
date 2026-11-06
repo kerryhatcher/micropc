@@ -1,0 +1,4 @@
+[alias]
+# Build the RP2040 firmware for the Cortex-M0+ target.
+fw = "build -p micropc-firmware --target thumbv6m-none-eabi"
+fw-release = "build -p micropc-firmware --target thumbv6m-none-eabi --release"
