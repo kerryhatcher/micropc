@@ -1,0 +1,5 @@
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+# Cortex-M0+ target for the RP2040 firmware crate.
+targets = ["thumbv6m-none-eabi"]

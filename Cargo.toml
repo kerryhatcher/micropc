@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = ["shared", "cli", "firmware"]
+# `firmware` targets thumbv6m-none-eabi and is excluded from default builds so
+# that a plain `cargo build` / `cargo test` works on the host. Build it with
+# `cargo fw` (see .cargo/config.toml).
+default-members = ["shared", "cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+micropc-shared = { path = "shared" }
+
+[profile.release]
+# Firmware-friendly defaults: small code, LTO, debug info kept for probe tooling.
+opt-level = "s"
+lto = true
+debug = 2
+codegen-units = 1
