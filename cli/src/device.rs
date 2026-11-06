@@ -3,7 +3,7 @@
 use std::fmt;
 use std::io::{self, Read, Write};
 
-use micropc_shared::{LedId, Request, Response, Rgb};
+use micropc_shared::{InfoKey, InfoValue, LedId, Request, Response, Rgb};
 
 /// The operations the rest of the TUI needs from the device.
 pub trait Device {
@@ -11,6 +11,8 @@ pub trait Device {
     fn get_color(&mut self, led: LedId) -> Result<Rgb, DeviceError>;
     /// Set an LED's color. Returns the color the device reports it now shows.
     fn set_color(&mut self, led: LedId, color: Rgb) -> Result<Rgb, DeviceError>;
+    /// Read one hardware value.
+    fn get_info(&mut self, key: InfoKey) -> Result<InfoValue, DeviceError>;
     /// Reboot the device into its USB bootloader (drive `RPI-RP2`).
     fn enter_bootloader(&mut self) -> Result<(), DeviceError>;
 }
@@ -19,7 +21,7 @@ pub trait Device {
 pub enum DeviceError {
     Io(io::Error),
     /// The device replied with something that isn't a valid response line,
-    /// or a reply about a different LED than the one asked for.
+    /// or a reply about a different LED or key than the one asked for.
     BadResponse(String),
     /// The device replied `ERR` to a request it could not handle.
     Rejected,
@@ -114,6 +116,15 @@ impl<T: Read + Write> Device for Client<T> {
         self.color_reply(Request::SetColor(led, color), led)
     }
 
+    fn get_info(&mut self, key: InfoKey) -> Result<InfoValue, DeviceError> {
+        match self.transact(Request::Info(key))? {
+            Response::Info(value) if value.key() == key => Ok(value),
+            Response::Info(value) => Err(DeviceError::BadResponse(format!("{value:?}"))),
+            Response::Error => Err(DeviceError::Rejected),
+            other => Err(DeviceError::BadResponse(format!("{other:?}"))),
+        }
+    }
+
     fn enter_bootloader(&mut self) -> Result<(), DeviceError> {
         match self.transact(Request::Bootloader)? {
             Response::Bootloader => Ok(()),
@@ -172,6 +183,25 @@ mod tests {
         let shown = client.set_color(LedId::Rgb, Rgb::new(0, 255, 0)).unwrap();
         assert_eq!(shown, Rgb::new(0, 255, 0));
         assert_eq!(client.io.written, b"SET rgb 0 255 0\n");
+    }
+
+    #[test]
+    fn get_info_parses_signed_temperature() {
+        let mut client = Client::new(MockIo::replying(b"INFO temp -512\n"));
+        assert_eq!(
+            client.get_info(InfoKey::Temperature).unwrap(),
+            InfoValue::TemperatureCentiC(-512)
+        );
+        assert_eq!(client.io.written, b"INFO temp\n");
+    }
+
+    #[test]
+    fn info_reply_for_other_key_is_bad_response() {
+        let mut client = Client::new(MockIo::replying(b"INFO rom 3\n"));
+        assert!(matches!(
+            client.get_info(InfoKey::Uptime),
+            Err(DeviceError::BadResponse(_))
+        ));
     }
 
     #[test]

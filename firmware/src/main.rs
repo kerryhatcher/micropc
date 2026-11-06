@@ -6,16 +6,19 @@
 //!
 //! The host sets and reads colors with the line protocol in
 //! `micropc_shared::protocol`. The device is the source of truth; every
-//! `GET` and `SET` reports the color the LED now shows.
+//! `GET` and `SET` reports the color the LED now shows. `INFO` reports
+//! hardware values from the RP2040 itself.
 
 #![no_std]
 #![no_main]
 
+mod hardware;
 mod neopixel;
 
 use cortex_m_rt::entry;
 use embedded_hal::digital::OutputPin;
 use embedded_hal::pwm::SetDutyCycle;
+use hardware::Hardware;
 use micropc_shared::{LedId, Request, Response, Rgb};
 use neopixel::NeoPixel;
 use panic_halt as _;
@@ -55,6 +58,9 @@ const USB_VID_PID: UsbVidPid = UsbVidPid(0x16c0, 0x27dd);
 
 #[entry]
 fn main() -> ! {
+    // Before anything else uses the stack, so stack usage can be measured.
+    hardware::paint_free_ram();
+
     let mut pac = pac::Peripherals::take().unwrap();
 
     let mut watchdog = Watchdog::new(pac.WATCHDOG);
@@ -112,6 +118,8 @@ fn main() -> ! {
     lights.set(LedId::Rgb, Rgb::OFF);
     lights.set(LedId::Neo, Rgb::OFF);
 
+    let mut hardware = Hardware::new(pac.SYSINFO, pac.ADC, pac.TIMER, &mut pac.RESETS, &clocks);
+
     let usb_bus = UsbBusAllocator::new(UsbBus::new(
         pac.USBCTRL_REGS,
         pac.USBCTRL_DPRAM,
@@ -164,6 +172,7 @@ fn main() -> ! {
                         lights.set(led, color);
                         Response::Color(led, color)
                     }
+                    Some(Request::Info(key)) => Response::Info(hardware.read(key)),
                     Some(Request::Bootloader) => Response::Bootloader,
                     None => Response::Error,
                 }

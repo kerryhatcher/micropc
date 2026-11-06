@@ -8,13 +8,15 @@
 
 pub mod protocol;
 
-pub use protocol::{LedId, Request, Response, Rgb};
+pub use protocol::{InfoKey, InfoValue, LedId, Request, Response, Rgb};
 
 /// Version of the wire protocol between the host tool and the firmware.
 /// Bump this on any breaking change to the message layout.
 /// v2: requests and replies name the LED they address (`rgb` or `neo`).
 /// v3: adds `BOOTSEL` to reboot into the USB bootloader.
-pub const PROTOCOL_VERSION: u8 = 3;
+/// v4: adds `INFO` to read hardware values (chip, uptime, temp, clock, ROM).
+/// v5: adds flash and RAM usage keys (`flash_total`, `flash_used`, ...).
+pub const PROTOCOL_VERSION: u8 = 5;
 
 #[cfg(test)]
 mod tests {

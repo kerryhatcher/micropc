@@ -6,10 +6,10 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, List, ListItem, ListState, Paragraph},
+    widgets::{Block, List, ListItem, ListState, Paragraph, Row, Table, Tabs},
 };
 
-use crate::app::{App, LedPanel, PRESETS, led_title, preset_name};
+use crate::app::{App, HardwareInfo, LedPanel, PRESETS, Tab, led_title, preset_name};
 
 /// Color of the border around the section that has keyboard focus.
 const FOCUS_COLOR: Color = Color::Cyan;
@@ -22,24 +22,37 @@ pub fn draw(frame: &mut Frame, app: &App) {
     ])
     .areas(frame.area());
 
+    let titles = Tab::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, tab)| format!("{} {}", i + 1, tab.title()));
     frame.render_widget(
-        Paragraph::new("micropc · LEDs")
-            .bold()
-            .centered()
-            .block(Block::bordered()),
+        Tabs::new(titles)
+            .select(app.tab.index())
+            .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+            .block(Block::bordered().title(" micropc ")),
         header,
     );
 
-    let sections = Layout::vertical([Constraint::Min(11), Constraint::Min(11)]).split(body);
-    for (index, (panel, area)) in app.panels.iter().zip(sections.iter()).enumerate() {
-        draw_panel(frame, panel, *area, index == app.focus);
+    match app.tab {
+        Tab::Leds => draw_leds(frame, app, body),
+        Tab::Hardware => draw_hardware(frame, &app.hardware, body),
     }
 
-    let help = format!(
-        " {}   ·   Tab switch LED  ↑/↓ select  Enter apply  r refresh  q quit",
-        app.status
-    );
+    let keys = match app.tab {
+        Tab::Leds => "Tab switch LED  ↑/↓ select  Enter apply  ←/→ tab  r refresh  q quit",
+        Tab::Hardware => "←/→ tab  r refresh  q quit",
+    };
+    let help = format!(" {}   ·   {keys}", app.status);
     frame.render_widget(Line::from(help).dim(), footer);
+}
+
+/// The LED tab: one section per LED, stacked.
+fn draw_leds(frame: &mut Frame, app: &App, area: Rect) {
+    let sections = Layout::vertical([Constraint::Min(11), Constraint::Min(11)]).split(area);
+    for (index, (panel, section)) in app.panels.iter().zip(sections.iter()).enumerate() {
+        draw_panel(frame, panel, *section, index == app.focus);
+    }
 }
 
 /// One LED's section: its current color on the left, its menu on the right.
@@ -117,6 +130,150 @@ fn draw_menu(frame: &mut Frame, panel: &LedPanel, area: Rect, focused: bool) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
+/// The hardware tab: a table of values read from the RP2040.
+fn draw_hardware(frame: &mut Frame, hw: &HardwareInfo, area: Rect) {
+    let rows = [
+        row("Board", "Seeed Studio XIAO RP2040".into()),
+        row(
+            "Chip ID",
+            hw.chip_id.map_or(unknown(), |v| format!("0x{v:08X}")),
+        ),
+        row(
+            "ROM version",
+            hw.rom_version.map_or(unknown(), |v| v.to_string()),
+        ),
+        row(
+            "System clock",
+            hw.sys_clock_hz.map_or(unknown(), |hz| {
+                format!("{:.3} MHz", f64::from(hz) / 1_000_000.0)
+            }),
+        ),
+        row("Uptime", hw.uptime_ms.map_or(unknown(), format_uptime)),
+        row(
+            "Die temperature",
+            hw.temperature_centi_c.map_or(unknown(), format_temperature),
+        ),
+        row("Flash", usage(hw.flash_used, hw.flash_total)),
+        row("RAM", usage(ram_in_use(hw), hw.ram_total)),
+        row("  static data", hw.ram_static.map_or(unknown(), size)),
+        row("  stack peak", hw.ram_stack_peak.map_or(unknown(), size)),
+    ];
+
+    let table = Table::new(rows, [Constraint::Length(18), Constraint::Min(10)])
+        .header(Row::new(["Item", "Value"]).bold())
+        .block(Block::bordered().title(" Hardware "));
+    frame.render_widget(table, area);
+}
+
+fn row(label: &'static str, value: String) -> Row<'static> {
+    Row::new([label.to_string(), value])
+}
+
+/// Static data plus the stack's peak use: the RAM the firmware has claimed.
+fn ram_in_use(hw: &HardwareInfo) -> Option<u32> {
+    Some(hw.ram_static? + hw.ram_stack_peak?)
+}
+
+/// `used` of `total`, with the free amount and percentage in use.
+fn usage(used: Option<u32>, total: Option<u32>) -> String {
+    match (used, total) {
+        (Some(used), Some(total)) if total > 0 => {
+            let free = total.saturating_sub(used);
+            // Tenths of a percent, so small usage doesn't round to 0%.
+            let tenths = u64::from(used) * 1000 / u64::from(total);
+            format!(
+                "{} used, {} free of {} ({}.{}%)",
+                size(used),
+                size(free),
+                size(total),
+                tenths / 10,
+                tenths % 10
+            )
+        }
+        _ => unknown(),
+    }
+}
+
+/// Bytes as KiB or MiB with one decimal place.
+fn size(bytes: u32) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    let b = f64::from(bytes);
+    if b >= MIB {
+        format!("{:.1} MiB", b / MIB)
+    } else {
+        format!("{:.1} KiB", b / KIB)
+    }
+}
+
+fn unknown() -> String {
+    "…".to_string()
+}
+
+/// `h:mm:ss` from milliseconds since boot.
+fn format_uptime(ms: u32) -> String {
+    let total = ms / 1000;
+    format!(
+        "{}:{:02}:{:02}",
+        total / 3600,
+        (total / 60) % 60,
+        total % 60
+    )
+}
+
+/// Hundredths of a degree Celsius to `NN.NN °C`.
+fn format_temperature(centi_c: i32) -> String {
+    let sign = if centi_c < 0 { "-" } else { "" };
+    let abs = centi_c.unsigned_abs();
+    format!("{sign}{}.{:02} °C", abs / 100, abs % 100)
+}
+
 fn to_color(c: Rgb) -> Color {
     Color::Rgb(c.r, c.g, c.b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uptime_formats_hours_minutes_seconds() {
+        assert_eq!(format_uptime(0), "0:00:00");
+        assert_eq!(format_uptime(4_200_000), "1:10:00");
+        assert_eq!(format_uptime(3_661_000), "1:01:01");
+    }
+
+    #[test]
+    fn size_picks_kib_or_mib() {
+        assert_eq!(size(1024), "1.0 KiB");
+        assert_eq!(size(40_960), "40.0 KiB");
+        assert_eq!(size(2 * 1024 * 1024), "2.0 MiB");
+    }
+
+    #[test]
+    fn usage_shows_used_free_and_percent() {
+        assert_eq!(
+            usage(Some(256 * 1024), Some(1024 * 1024)),
+            "256.0 KiB used, 768.0 KiB free of 1.0 MiB (25.0%)"
+        );
+        assert_eq!(usage(None, Some(1024)), "…");
+    }
+
+    #[test]
+    fn ram_in_use_sums_static_and_stack() {
+        let hw = HardwareInfo {
+            ram_static: Some(8_192),
+            ram_stack_peak: Some(1_024),
+            ..HardwareInfo::default()
+        };
+        assert_eq!(ram_in_use(&hw), Some(9_216));
+        assert_eq!(ram_in_use(&HardwareInfo::default()), None);
+    }
+
+    #[test]
+    fn temperature_formats_sign_and_hundredths() {
+        assert_eq!(format_temperature(2534), "25.34 °C");
+        assert_eq!(format_temperature(-512), "-5.12 °C");
+        assert_eq!(format_temperature(5), "0.05 °C");
+    }
 }

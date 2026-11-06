@@ -1,7 +1,7 @@
 //! TUI state and key handling. Independent of the terminal and the serial
 //! port so it can be unit-tested against a fake [`Device`].
 
-use micropc_shared::{LedId, Rgb};
+use micropc_shared::{InfoKey, InfoValue, LedId, Rgb};
 use ratatui::crossterm::event::KeyCode;
 
 use crate::device::Device;
@@ -66,6 +66,29 @@ pub fn led_title(led: LedId) -> &'static str {
     }
 }
 
+/// The top-level tabs, in display order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    Leds,
+    Hardware,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 2] = [Tab::Leds, Tab::Hardware];
+
+    pub const fn title(self) -> &'static str {
+        match self {
+            Tab::Leds => "LEDs",
+            Tab::Hardware => "Hardware",
+        }
+    }
+
+    /// Position in [`Tab::ALL`].
+    pub fn index(self) -> usize {
+        Tab::ALL.iter().position(|t| *t == self).unwrap_or(0)
+    }
+}
+
 /// One LED's section: its last-read color and its menu selection.
 pub struct LedPanel {
     pub id: LedId,
@@ -85,11 +108,50 @@ impl LedPanel {
     }
 }
 
+/// The most recent hardware readings. Each field is `None` until read.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct HardwareInfo {
+    pub chip_id: Option<u32>,
+    pub uptime_ms: Option<u32>,
+    pub temperature_centi_c: Option<i32>,
+    pub sys_clock_hz: Option<u32>,
+    pub rom_version: Option<u8>,
+    /// Flash the firmware can use, in bytes.
+    pub flash_total: Option<u32>,
+    /// Flash the firmware image occupies, in bytes.
+    pub flash_used: Option<u32>,
+    /// SRAM the firmware links into, in bytes.
+    pub ram_total: Option<u32>,
+    /// SRAM used by static data, in bytes.
+    pub ram_static: Option<u32>,
+    /// Most stack the firmware has used since boot, in bytes.
+    pub ram_stack_peak: Option<u32>,
+}
+
+impl HardwareInfo {
+    fn set(&mut self, value: InfoValue) {
+        match value {
+            InfoValue::Chip(v) => self.chip_id = Some(v),
+            InfoValue::UptimeMs(v) => self.uptime_ms = Some(v),
+            InfoValue::TemperatureCentiC(v) => self.temperature_centi_c = Some(v),
+            InfoValue::SysClockHz(v) => self.sys_clock_hz = Some(v),
+            InfoValue::RomVersion(v) => self.rom_version = Some(v),
+            InfoValue::FlashTotalBytes(v) => self.flash_total = Some(v),
+            InfoValue::FlashUsedBytes(v) => self.flash_used = Some(v),
+            InfoValue::RamTotalBytes(v) => self.ram_total = Some(v),
+            InfoValue::RamStaticBytes(v) => self.ram_static = Some(v),
+            InfoValue::RamStackPeakBytes(v) => self.ram_stack_peak = Some(v),
+        }
+    }
+}
+
 pub struct App {
+    pub tab: Tab,
     /// One panel per LED, in display order.
     pub panels: [LedPanel; 2],
-    /// Index into `panels` of the section that receives keys.
+    /// Index into `panels` of the LED section that receives keys.
     pub focus: usize,
+    pub hardware: HardwareInfo,
     /// One-line message shown in the footer.
     pub status: String,
     pub should_quit: bool,
@@ -104,14 +166,16 @@ impl Default for App {
 impl App {
     pub fn new() -> Self {
         Self {
+            tab: Tab::Leds,
             panels: LedId::ALL.map(LedPanel::new),
             focus: 0,
+            hardware: HardwareInfo::default(),
             status: String::from("connected"),
             should_quit: false,
         }
     }
 
-    /// Ask the device for every LED's current color.
+    /// Ask the device for every LED's color and every hardware value.
     pub fn refresh(&mut self, device: &mut dyn Device) {
         for panel in &mut self.panels {
             match device.get_color(panel.id) {
@@ -119,6 +183,12 @@ impl App {
                 Err(e) => {
                     self.status = format!("{} read failed: {e}", led_title(panel.id));
                 }
+            }
+        }
+        for key in InfoKey::ALL {
+            match device.get_info(key) {
+                Ok(value) => self.hardware.set(value),
+                Err(e) => self.status = format!("hardware read failed: {e}"),
             }
         }
     }
@@ -142,6 +212,20 @@ impl App {
         self.focus = (self.focus + 1) % self.panels.len();
     }
 
+    pub fn select_tab(&mut self, tab: Tab) {
+        self.tab = tab;
+    }
+
+    pub fn next_tab(&mut self) {
+        let next = (self.tab.index() + 1) % Tab::ALL.len();
+        self.tab = Tab::ALL[next];
+    }
+
+    pub fn prev_tab(&mut self) {
+        let prev = (self.tab.index() + Tab::ALL.len() - 1) % Tab::ALL.len();
+        self.tab = Tab::ALL[prev];
+    }
+
     pub fn select_next(&mut self) {
         let panel = &mut self.panels[self.focus];
         panel.selected = (panel.selected + 1) % PRESETS.len();
@@ -153,13 +237,29 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyCode, device: &mut dyn Device) {
+        // Keys that work on every tab.
         match key {
-            KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            KeyCode::Char('q') | KeyCode::Esc => {
+                self.should_quit = true;
+                return;
+            }
+            KeyCode::Char('1') => return self.select_tab(Tab::Leds),
+            KeyCode::Char('2') => return self.select_tab(Tab::Hardware),
+            KeyCode::Right | KeyCode::Char('l') => return self.next_tab(),
+            KeyCode::Left | KeyCode::Char('h') => return self.prev_tab(),
+            KeyCode::Char('r') => return self.refresh(device),
+            _ => {}
+        }
+
+        // Keys that only make sense on the LED tab.
+        if self.tab != Tab::Leds {
+            return;
+        }
+        match key {
             KeyCode::Tab => self.focus_next(),
             KeyCode::Up | KeyCode::Char('k') => self.select_prev(),
             KeyCode::Down | KeyCode::Char('j') => self.select_next(),
             KeyCode::Enter | KeyCode::Char(' ') => self.apply_selected(device),
-            KeyCode::Char('r') => self.refresh(device),
             _ => {}
         }
     }
@@ -171,8 +271,9 @@ mod tests {
     use crate::device::DeviceError;
     use std::io;
 
-    /// In-memory device with one color per LED. `fail` makes every call
-    /// return an I/O error. `sets` records each (LED, color) written.
+    /// In-memory device with one color per LED and fixed hardware values.
+    /// `fail` makes every call return an I/O error. `sets` records each
+    /// (LED, color) written.
     struct FakeDevice {
         rgb: Rgb,
         neo: Rgb,
@@ -219,6 +320,24 @@ mod tests {
             Ok(color)
         }
 
+        fn get_info(&mut self, key: InfoKey) -> Result<InfoValue, DeviceError> {
+            if self.fail {
+                return Err(Self::err());
+            }
+            Ok(match key {
+                InfoKey::Chip => InfoValue::Chip(0x1234_5678),
+                InfoKey::Uptime => InfoValue::UptimeMs(4_200),
+                InfoKey::Temperature => InfoValue::TemperatureCentiC(2534),
+                InfoKey::SysClock => InfoValue::SysClockHz(125_000_000),
+                InfoKey::RomVersion => InfoValue::RomVersion(3),
+                InfoKey::FlashTotal => InfoValue::FlashTotalBytes(2 * 1024 * 1024),
+                InfoKey::FlashUsed => InfoValue::FlashUsedBytes(40_960),
+                InfoKey::RamTotal => InfoValue::RamTotalBytes(256 * 1024),
+                InfoKey::RamStatic => InfoValue::RamStaticBytes(8_192),
+                InfoKey::RamStackPeak => InfoValue::RamStackPeakBytes(1_024),
+            })
+        }
+
         fn enter_bootloader(&mut self) -> Result<(), DeviceError> {
             Err(Self::err())
         }
@@ -237,6 +356,23 @@ mod tests {
     }
 
     #[test]
+    fn refresh_reads_hardware_values() {
+        let mut dev = FakeDevice::new();
+        let mut app = App::new();
+        app.refresh(&mut dev);
+        assert_eq!(app.hardware.chip_id, Some(0x1234_5678));
+        assert_eq!(app.hardware.uptime_ms, Some(4_200));
+        assert_eq!(app.hardware.temperature_centi_c, Some(2534));
+        assert_eq!(app.hardware.sys_clock_hz, Some(125_000_000));
+        assert_eq!(app.hardware.rom_version, Some(3));
+        assert_eq!(app.hardware.flash_total, Some(2 * 1024 * 1024));
+        assert_eq!(app.hardware.flash_used, Some(40_960));
+        assert_eq!(app.hardware.ram_total, Some(256 * 1024));
+        assert_eq!(app.hardware.ram_static, Some(8_192));
+        assert_eq!(app.hardware.ram_stack_peak, Some(1_024));
+    }
+
+    #[test]
     fn apply_sends_focused_leds_preset() {
         let mut dev = FakeDevice::new();
         let mut app = App::new();
@@ -248,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_moves_focus_and_apply_targets_the_neopixel() {
+    fn tab_moves_led_focus_and_apply_targets_the_neopixel() {
         let mut dev = FakeDevice::new();
         let mut app = App::new();
         app.handle_key(KeyCode::Tab, &mut dev);
@@ -302,6 +438,45 @@ mod tests {
         let mut app = App::new();
         app.handle_key(KeyCode::Char('q'), &mut dev);
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn tabs_switch_with_arrows_and_digits() {
+        let mut dev = FakeDevice::new();
+        let mut app = App::new();
+        assert_eq!(app.tab, Tab::Leds);
+        app.handle_key(KeyCode::Right, &mut dev);
+        assert_eq!(app.tab, Tab::Hardware);
+        app.handle_key(KeyCode::Right, &mut dev);
+        assert_eq!(app.tab, Tab::Leds, "wraps around");
+        app.handle_key(KeyCode::Char('2'), &mut dev);
+        assert_eq!(app.tab, Tab::Hardware);
+        app.handle_key(KeyCode::Char('1'), &mut dev);
+        assert_eq!(app.tab, Tab::Leds);
+        app.handle_key(KeyCode::Left, &mut dev);
+        assert_eq!(app.tab, Tab::Hardware, "wraps backwards too");
+    }
+
+    #[test]
+    fn led_keys_do_nothing_on_the_hardware_tab() {
+        let mut dev = FakeDevice::new();
+        let mut app = App::new();
+        app.handle_key(KeyCode::Char('2'), &mut dev);
+        app.handle_key(KeyCode::Down, &mut dev);
+        app.handle_key(KeyCode::Enter, &mut dev);
+        app.handle_key(KeyCode::Tab, &mut dev);
+        assert!(dev.sets.is_empty());
+        assert_eq!(app.panels[0].selected, 0);
+        assert_eq!(app.focus, 0);
+    }
+
+    #[test]
+    fn refresh_works_on_every_tab() {
+        let mut dev = FakeDevice::new();
+        let mut app = App::new();
+        app.handle_key(KeyCode::Char('2'), &mut dev);
+        app.handle_key(KeyCode::Char('r'), &mut dev);
+        assert_eq!(app.hardware.chip_id, Some(0x1234_5678));
     }
 
     #[test]
